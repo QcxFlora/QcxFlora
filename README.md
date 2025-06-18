@@ -12,10 +12,6 @@
 ## 擅长的开发语言：
 
 自然语言开发，编辑完成后丢任意ai中编译既可跨平台运行，报错率随ai实力而浮动🤓
-<div align="right">
-<img src="gif.gif">
-</div>
-
 
 ## **社交：**
 <div align="center">
