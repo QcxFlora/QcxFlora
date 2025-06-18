@@ -1,0 +1,85 @@
+name: 每日gif更换
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # 每天 UTC 时间午夜0点运行
+  workflow_dispatch: # 允许手动触发
+
+permissions:
+  contents: write # 授予写入仓库内容的权限
+
+jobs:
+  update-image:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download and save image
+        id: download_image
+        run: |
+          # 生成带时间戳的新图片文件名
+          TIMESTAMP=$(date +%Y%m%d%H%M)
+          NEW_IMAGE_NAME="gif${TIMESTAMP}.gif"
+          IMAGE_URL="https://yugan.love/?name=小南梁"
+
+          echo "Attempting to download image from: $IMAGE_URL"
+
+          # --- 清理旧的图片文件 ---
+          echo "Cleaning up old image files (gif*.gif)..."
+          rm -f gif*.gif
+
+          # 使用 curl 下载图片，并保存为新的带时间戳的名称
+          curl -f -s -L -o "$NEW_IMAGE_NAME" -H "Cache-Control: no-cache" -H "Pragma: no-cache" -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36" "$IMAGE_URL"
+
+          # 检查 curl 命令的退出状态码
+          if [ $? -ne 0 ]; then
+            echo "::error::Image download failed for $IMAGE_URL. Curl exited with non-zero status."
+            exit 1 # 退出工作流，标记为失败
+          fi
+
+          # 再次检查图片文件是否存在且非空
+          if [ ! -s "$NEW_IMAGE_NAME" ]; then
+            echo "::error::Downloaded image file $NEW_IMAGE_NAME is empty or does not exist."
+            exit 1 # 退出工作流，标记为失败
+          fi
+          echo "Image downloaded successfully as $NEW_IMAGE_NAME."
+
+          # 计算并打印图片的MD5哈希值（用于调试）
+          MD5_HASH=$(md5sum "$NEW_IMAGE_NAME" | awk '{print $1}')
+          echo "Downloaded image MD5 hash: $MD5_HASH"
+
+          # 将新图片名称作为输出传递给后续步骤
+          echo "new_image_name=$NEW_IMAGE_NAME" >> $GITHUB_OUTPUT
+          echo "image_downloaded=true" >> $GITHUB_OUTPUT
+
+      - name: Commit and push changes
+        if: success() && steps.download_image.outputs.image_downloaded == 'true'
+        run: |
+          # 获取上一步生成的新图片名称
+          NEW_IMAGE_NAME="${{ steps.download_image.outputs.new_image_name }}"
+
+          # 配置 Git 用户信息
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # --- 更新 README.md 文件 ---
+          sed -i -E "s|src=\"gif[0-9]*\.gif\"|src=\"${NEW_IMAGE_NAME}\"|" README.md
+          echo "README.md updated to reference: ${NEW_IMAGE_NAME}"
+
+          # 添加所有更改到暂存区
+          git add -A
+
+          # 强制提交更改，无论是否有内容变化
+          # 这样可以确保工作区和暂存区是干净的，以便 rebase 顺利进行
+          git commit -m "chore: Update daily image (${NEW_IMAGE_NAME}) and README.md [skip ci]"
+
+          # 在提交后拉取最新代码并rebase，解决推送冲突
+          # 此时本地已经有了一个提交，rebase 应该能顺利进行
+          git pull --rebase origin main
+
+          # 推送更改
+          git push
+          echo "Image and README.md updated and pushed successfully."
