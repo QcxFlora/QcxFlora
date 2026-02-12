@@ -26,8 +26,8 @@
 -   <img src="wyyyx.png" style="height: 18px; width: 18px; margin-right: 6px;" /><a href="mailto:boxy2699@163.com">我的邮箱
    ><img src="https://avatars.githubusercontent.com/u/197634234?v=4" style="height: 18px; width: 18px; margin-right: 6px;" />boxy2699@163.com
 
-## **看看视频**
-<a href="https://v2.api-m.com/api/meinv?return=302">小姐姐~<br>
+## **白丝~**
+<a href="https://api.kxzjoker.cn/api/wallhere?type=bs">点我<br>
 ### **<a href="https://api.waifu.pics/sfw/waifu">今日份美图**
 <img style="float: right;" src="美图202602120740.png">
 <div style="clear: both; height: 0; overflow: hidden; margin: 0; padding: 0;"></div>
