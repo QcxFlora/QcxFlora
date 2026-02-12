@@ -15,6 +15,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          # 使用 GITHUB_TOKEN 来进行认证，以便后续可以推送代码
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Download and save image
@@ -28,13 +29,89 @@ jobs:
           echo "Attempting to download image from: $IMAGE_URL"
 
           # --- 清理旧的图片文件 ---
+          # 使用 find 和 -delete，比 rm 更安全，可以避免在没有匹配项时出错
           echo "Cleaning up old image files (美图*.png)..."
-          rm -f 美图*.png
+          find . -maxdepth 1 -name "美图*.png" -delete
 
           # 使用 curl 下载图片，并保存为新的带时间戳的名称
+          # -f: 在服务器错误时静默失败（返回非零退出码）
+          # -s: 静默模式
+          # -L: 跟随重定向
+          # -o: 输出到文件
           curl -f -s -L -o "$NEW_IMAGE_NAME" -H "Cache-Control: no-cache" -H "Pragma: no-cache" -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36" "$IMAGE_URL"
 
           # 检查 curl 命令的退出状态码
+          if [ $? -ne 0 ]; then
+            echo "::error::Image download failed for $IMAGE_URL. Curl exited with non-zero status."
+            exit 1 # 退出工作流，标记为失败
+          fi
+
+          # 再次检查图片文件是否存在且非空
+          if [ ! -s "$NEW_IMAGE_NAME" ]; then
+            echo "::error::Downloaded image file $NEW_IMAGE_NAME is empty or does not exist."
+            exit 1 # 退出工作流，标记为失败
+          fi
+          echo "Image downloaded successfully as $NEW_IMAGE_NAME."
+
+          # 计算并打印图片的MD5哈希值（用于调试）
+          MD5_HASH=$(md5sum "$NEW_IMAGE_NAME" | awk '{print $1}')
+          echo "Downloaded image MD5 hash: $MD5_HASH"
+
+          # 将新图片名称作为输出传递给后续步骤
+          echo "new_image_name=$NEW_IMAGE_NAME" >> $GITHUB_OUTPUT
+          echo "image_downloaded=true" >> $GITHUB_OUTPUT
+
+      - name: Commit and push changes
+        # 仅当上一步成功且确实下载了图片时才运行
+        if: success() && steps.download_image.outputs.image_downloaded == 'true'
+        run: |
+          # 获取上一步生成的新图片名称
+          NEW_IMAGE_NAME="${{ steps.download_image.outputs.new_image_name }}"
+
+          # 配置 Git 用户信息
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # --- 更新 README.md 文件 ---
+          # 使用更健壮的 sed 命令，避免因文件名中的特殊字符导致问题
+          sed -i -E "s|src=\"美图[0-9]*\.png\"|src=\"${NEW_IMAGE_NAME}\"|" README.md
+          echo "README.md updated to reference: ${NEW_IMAGE_NAME}"
+
+          # 添加明确需要更改的文件到暂存区，这比 'git add -A' 更安全
+          git add README.md "${NEW_IMAGE_NAME}"
+
+          # 检查是否有实际更改需要提交
+          if git diff --staged --quiet; then
+            echo "No changes to commit. Workflow finished."
+            exit 0
+          fi
+
+          # 提交更改
+          git commit -m "chore: Update daily image (${NEW_IMAGE_NAME}) [skip ci]"
+
+          # --- 关键改动：使用循环来处理潜在的推送冲突 ---
+          # 设置重试次数，以防万一出现无法解决的循环
+          for i in {1..5}; do
+            # 先尝试直接推送
+            if git push origin main; then
+              echo "Push successful on attempt $i."
+              break
+            else
+              echo "Push failed on attempt $i. Retrying with pull --rebase..."
+              # 如果推送失败，先从远程拉取最新代码并变基
+              # --autostash 会自动保存你的本地修改，变基后再应用，可以处理一些简单冲突
+              git pull --rebase --autostash origin main
+              # 如果循环5次后仍然失败，则退出并报错
+              if [ $i -eq 5 ]; then
+                echo "::error::Failed to push changes after multiple retries."
+                exit 1
+              fi
+            fi
+            # 短暂等待2秒，避免过于频繁的 API 请求
+            sleep 2
+          done
+          
+          echo "Image and README.md updated and pushed successfully."          # 检查 curl 命令的退出状态码
           if [ $? -ne 0 ]; then
             echo "::error::Image download failed for $IMAGE_URL. Curl exited with non-zero status."
             exit 1 # 退出工作流，标记为失败
