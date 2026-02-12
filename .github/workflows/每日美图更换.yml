@@ -17,24 +17,132 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Download and verify image with anti-anti-scraping
+      - name: Download image using Headless Browser (Puppeteer)
         id: download_image
         run: |
-          # 安装 file 命令，用于识别文件类型
-          sudo apt-get update && sudo apt-get install -y file
+          # --- 步骤 1: 设置 Node.js 环境并安装 Puppeteer ---
+          echo "设置 Node.js 环境..."
+          sudo apt-get update
+          sudo apt-get install -y nodejs npm
+          echo "安装 Puppeteer... (这可能需要几分钟，因为它会下载一个 Chrome 浏览器)"
+          npm install puppeteer
 
+          # --- 步骤 2: 编写并执行 Node.js 脚本来下载图片 ---
           TIMESTAMP=$(date +%Y%m%d%H%M)
-          NEW_IMAGE_NAME="美图${TIMESTAMP}.png"
-          TEMP_DOWNLOAD_FILE="temp_download"
-          COOKIE_JAR="cookies.txt" # 用于存储和发送 Cookie 的文件
-          IMAGE_URL="https://api.kxzjoker.cn/api/wallhere?type=bs"
+          # 注意：我们不知道最终图片是 png 还是 jpg，先用一个临时名
+          TEMP_IMAGE_PATH="temp_image"
+          
+          # 将 Node.js 脚本写入一个文件
+          cat <<'EOF' > download.js
+          const puppeteer = require('puppeteer');
+          const fs = require('fs');
 
-          echo "--- 步骤 1: 清理旧文件 ---"
-          find . -maxdepth 1 -name "美图*.png" -delete
-          rm -f "$COOKIE_JAR" "$TEMP_DOWNLOAD_FILE" # 清理上次运行的临时文件
-          echo "旧图片和临时文件已清理。"
+          (async () => {
+            console.log('启动无头浏览器...');
+            const browser = await puppeteer.launch({
+              args: ['--no-sandbox', '--disable-setuid-sandbox']
+            });
+            const page = await browser.newPage();
+            
+            // 模拟一个非常真实的浏览器视口和 User-Agent
+            await page.setViewport({ width: 1920, height: 1080 });
+            await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36');
 
-          echo "--- 步骤 2: 尝试下载内容 (带反反爬虫策略) ---"
+            const url = 'https://api.kxzjoker.cn/api/wallhere?type=bs';
+            console.log(`正在导航到: ${url}`);
+
+            try {
+              // 关键：监听 'response' 事件，捕获图片数据
+              let imageBuffer;
+              page.on('response', async (response) => {
+                const responseUrl = response.url();
+                // 检查响应是否是图片，并且是最终的图片 URL（通常会重定向）
+                if (response.request().resourceType() === 'image' && response.status() === 200) {
+                  console.log(`捕获到图片响应: ${responseUrl}`);
+                  imageBuffer = await response.buffer();
+                }
+              });
+
+              // 导航到页面，设置较长的超时时间，等待所有网络活动结束
+              await page.goto(url, { waitUntil: 'networkidle0', timeout: 60000 });
+
+              if (imageBuffer) {
+                // 根据捕获到的内容类型确定文件扩展名
+                const contentType = imageBuffer.toString('hex', 0, 4);
+                let extension = '.jpg'; // 默认为 jpg
+                if (contentType.startsWith('89504e47')) { // PNG magic number
+                  extension = '.png';
+                }
+                
+                const finalImagePath = `temp_image${extension}`;
+                fs.writeFileSync(finalImagePath, imageBuffer);
+                console.log(`图片已成功保存为: ${finalImagePath}`);
+                // 将最终文件名输出到控制台，以便后续 shell 脚本捕获
+                process.stdout.write(finalImagePath);
+              } else {
+                throw new Error('未能在页面上捕获到有效的图片响应。');
+              }
+
+            } catch (error) {
+              console.error('::error::使用 Puppeteer 下载图片时出错:', error);
+              process.exit(1);
+            } finally {
+              await browser.close();
+            }
+          })();
+          EOF
+
+          # --- 步骤 3: 执行脚本并处理结果 ---
+          echo "执行 Node.js 下载脚本..."
+          # 执行脚本，并将输出（即文件名）保存到变量
+          FINAL_TEMP_NAME=$(node download.js)
+          
+          if [ -z "$FINAL_TEMP_NAME" ]; then
+            echo "::error::Node.js 脚本未能成功返回文件名。"
+            exit 1
+          fi
+
+          # 根据脚本生成的文件扩展名确定最终文件名
+          EXTENSION="${FINAL_TEMP_NAME#*.}"
+          NEW_IMAGE_NAME="美图${TIMESTAMP}.${EXTENSION}"
+
+          mv "$FINAL_TEMP_NAME" "$NEW_IMAGE_NAME"
+          echo "图片已成功下载并命名为: $NEW_IMAGE_NAME"
+
+          # 清理旧图片
+          find . -maxdepth 1 -type f \( -name "美图*.png" -o -name "美图*.jpg" \) -not -name "$NEW_IMAGE_NAME" -delete
+
+          echo "new_image_name=$NEW_IMAGE_NAME" >> $GITHUB_OUTPUT
+          echo "image_downloaded=true" >> $GITHUB_OUTPUT
+
+      - name: Commit and push changes
+        if: success() && steps.download_image.outputs.image_downloaded == 'true'
+        run: |
+          # (此部分与之前版本相同，保持健壮)
+          NEW_IMAGE_NAME="${{ steps.download_image.outputs.new_image_name }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          sed -i -E "s|src=\"美图[0-9]*\.(png|jpg)\"|src=\"${NEW_IMAGE_NAME}\"|" README.md
+          git add README.md "${NEW_IMAGE_NAME}"
+          if git diff --staged --quiet; then
+            echo "没有文件变动，无需提交。"
+            exit 0
+          fi
+          git commit -m "chore: 更新每日图片 (${NEW_IMAGE_NAME}) [skip ci]"
+          for i in {1..5}; do
+            if git push origin main; then
+              echo "推送成功。"
+              break
+            else
+              echo "推送失败，尝试拉取并变基... (尝试次数: $i)"
+              git pull --rebase --autostash origin main
+              if [ $i -eq 5 ]; then
+                echo "::error::多次重试后推送仍然失败。"
+                exit 1
+              fi
+              sleep 3
+            fi
+          done          echo "--- 步骤 2: 尝试下载内容 (带反反爬虫策略) ---"
           # 使用 curl 模拟浏览器行为，并处理 Cookie
           # -c: 将服务器返回的 Cookie 保存到 cookie jar 文件
           # -b: 从 cookie jar 文件读取 Cookie 并发送
