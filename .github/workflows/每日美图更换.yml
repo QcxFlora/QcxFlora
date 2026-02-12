@@ -20,21 +20,85 @@ jobs:
       - name: Download image from a reliable Anime API (waifu.pics)
         id: download_image
         run: |
-          # --- 步骤 1: 安装 jq, 一个用于处理 JSON 的命令行工具 ---
-          # 我们将输出重定向到 /dev/null 来保持日志干净
+          # 步骤 1: 安装 jq
           sudo apt-get update -y >/dev/null && sudo apt-get install -y jq >/dev/null
 
-          # --- 步骤 2: 从 waifu.pics 获取图片链接 ---
-          # 这是一个为全球开发者设计的、稳定可靠的二次元API
-          IMAGE_CATEGORY="waifu" # 您可以换成 neko, shinobu, megumin 等
+          # 步骤 2: 从 waifu.pics 获取图片链接
+          IMAGE_CATEGORY="waifu"
           API_URL="https://api.waifu.pics/sfw/${IMAGE_CATEGORY}"
-
           echo "正在从 $API_URL 获取图片链接..."
           JSON_RESPONSE=$(curl -s -L "$API_URL")
-          
-          # 使用 jq 从JSON响应中提取 "url" 字段
           IMAGE_URL=$(echo "$JSON_RESPONSE" | jq -r '.url')
 
+          if [ -z "$IMAGE_URL" ] || [ "$IMAGE_URL" == "null" ]; then
+            echo "::error::未能从API响应中获取图片URL。"
+            exit 1
+          fi
+          echo "成功获取图片链接: $IMAGE_URL"
+
+          # 步骤 3: 清理旧图片并下载新图片
+          find . -maxdepth 1 -type f \( -name "美图*.png" -o -name "美图*.jpg" -o -name "美图*.gif" \) -delete
+          echo "旧图片已清理。"
+
+          EXTENSION="${IMAGE_URL##*.}"
+          TIMESTAMP=$(date +%Y%m%d%H%M)
+          NEW_IMAGE_NAME="美图${TIMESTAMP}.${EXTENSION}"
+
+          echo "正在下载图片到 $NEW_IMAGE_NAME ..."
+          HTTP_STATUS=$(curl -s -L -w "%{http_code}" -o "$NEW_IMAGE_NAME" "$IMAGE_URL")
+
+          if [ "$HTTP_STATUS" -ne 200 ]; then
+            echo "::error::下载图片失败，HTTP 状态码为 $HTTP_STATUS。"
+            exit 1
+          fi
+          if [ ! -s "$NEW_IMAGE_NAME" ]; then
+            echo "::error::下载的文件为空。"
+            exit 1
+          fi
+          echo "图片已成功下载。"
+
+          # 步骤 4: 设置输出
+          echo "new_image_name=$NEW_IMAGE_NAME" >> $GITHUB_OUTPUT
+
+      - name: Commit and push changes
+        if: success()
+        run: |
+          # 这是一个语法绝对纯净的脚本块
+          NEW_IMAGE_NAME="${{ steps.download_image.outputs.new_image_name }}"
+          
+          # 如果上一步没有成功设置 new_image_name，则退出
+          if [ -z "$NEW_IMAGE_NAME" ]; then
+            echo "未能获取新图片名称，跳过提交。"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          sed -i -E "s|src=\"美图[0-9]*\.[a-zA-Z0-9]+\"|src=\"${NEW_IMAGE_NAME}\"|" README.md
+          
+          git add README.md "${NEW_IMAGE_NAME}"
+          
+          if git diff --staged --quiet; then
+            echo "没有文件变动，无需提交。"
+            exit 0
+          fi
+          
+          git commit -m "chore: 更新每日图片 (${NEW_IMAGE_NAME}) [skip ci]"
+          
+          for i in {1..5}; do
+            if git push origin main; then
+              echo "推送成功。"
+              break
+            fi
+            echo "推送失败，正在拉取并变基... (尝试次数: $i)"
+            git pull --rebase --autostash origin main
+            if [ $i -eq 5 ]; then
+              echo "::error::多次重试后推送仍然失败。"
+              exit 1
+            fi
+            sleep 2
+          done
           if [ -z "$IMAGE_URL" ] || [ "$IMAGE_URL" == "null" ]; then
             echo "::error::未能从API响应中获取图片URL。API响应如下:"
             echo "$JSON_RESPONSE"
