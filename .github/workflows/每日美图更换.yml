@@ -6,7 +6,7 @@ on:
   workflow_dispatch: # 允许手动触发
 
 permissions:
-  contents: write # 授予写入仓库内容的权限
+  contents: write
 
 jobs:
   update-image:
@@ -17,24 +17,95 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Download and save image
+      - name: Download and save new image
         id: download_image
         run: |
-          # --- 使用可以直接返回图片的二次元 API ---
-          # 这个 API 会随机重定向到一个图片地址
-          # 更多选项可以参考其文档
+          # 使用一个可以直接重定向到图片的二次元API
           IMAGE_URL="https://iw233.cn/api.php?sort=random"
 
-          # --- 清理旧的图片文件 ---
-          echo "Cleaning up old image files (美图*.*)..."
-          # 使用 find 清理所有格式的旧图片
+          echo "--- 步骤 1: 清理旧图片 ---"
+          # 使用 find 安全地删除所有格式的旧图片
           find . -maxdepth 1 -type f \( -name "美图*.png" -o -name "美图*.jpg" -o -name "美图*.gif" \) -delete
+          echo "旧图片已清理。"
 
-          # --- 下载图片 ---
-          # 使用 curl 的 -J -O 参数来自动处理文件名
-          # -J: 使用服务器提供的 Content-Disposition 文件名
-          # -O: 将文件保存为远程服务器上的名字
-          # -L: 跟随重定向
+          echo "--- 步骤 2: 下载新图片 ---"
+          # 先将图片下载到一个临时文件，因为我们不知道它的原始文件名和扩展名
+          TEMP_FILE="downloaded_image"
+          HTTP_STATUS=$(curl -s -L -w "%{http_code}" -o "$TEMP_FILE" "$IMAGE_URL")
+
+          if [ "$HTTP_STATUS" -ne 200 ]; then
+            echo "::error::图片下载失败，HTTP 状态码为 $HTTP_STATUS。"
+            exit 1
+          fi
+
+          if [ ! -s "$TEMP_FILE" ]; then
+            echo "::error::下载的文件为空。"
+            exit 1
+          fi
+
+          echo "--- 步骤 3: 识别文件类型并重命名 ---"
+          # 安装 file 工具来准确识别文件类型
+          sudo apt-get update -y >/dev/null && sudo apt-get install -y file >/dev/null
+          
+          FILE_TYPE=$(file --mime-type -b "$TEMP_FILE")
+          echo "检测到文件类型为: $FILE_TYPE"
+          
+          EXTENSION="jpg" # 默认为 jpg
+          if [[ "$FILE_TYPE" == "image/png" ]]; then
+            EXTENSION="png"
+          elif [[ "$FILE_TYPE" == "image/gif" ]]; then
+            EXTENSION="gif"
+          elif [[ "$FILE_TYPE" != "image/jpeg" ]]; then
+             echo "::error::下载的内容不是有效的图片 (JPEG/PNG/GIF)。实际类型为: $FILE_TYPE。"
+             exit 1
+          fi
+
+          TIMESTAMP=$(date +%Y%m%d%H%M)
+          NEW_IMAGE_NAME="美图${TIMESTAMP}.${EXTENSION}"
+          
+          mv "$TEMP_FILE" "$NEW_IMAGE_NAME"
+          echo "图片已成功下载并命名为: $NEW_IMAGE_NAME"
+
+          # --- 步骤 4: 设置输出 ---
+          echo "new_image_name=$NEW_IMAGE_NAME" >> $GITHUB_OUTPUT
+          echo "image_downloaded=true" >> $GITHUB_OUTPUT
+
+      - name: Commit and push changes
+        if: success() && steps.download_image.outputs.image_downloaded == 'true'
+        run: |
+          # 这个脚本块只包含 git 命令，语法干净
+          NEW_IMAGE_NAME="${{ steps.download_image.outputs.new_image_name }}"
+          
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          sed -i -E "s|src=\"美图[0-9]*\.[a-zA-Z0-9]+\"|src=\"${NEW_IMAGE_NAME}\"|" README.md
+          
+          git add README.md "${NEW_IMAGE_NAME}"
+          
+          # 检查是否有实际更改，避免空提交
+          if git diff --staged --quiet; then
+            echo "没有文件变动，无需提交。"
+            exit 0
+          fi
+          
+          git commit -m "chore: 更新每日图片 (${NEW_IMAGE_NAME}) [skip ci]"
+          
+          # 使用健壮的循环推送逻辑
+          for i in {1..5}; do
+            if git push origin main; then
+              echo "推送成功。"
+              break
+            else
+              echo "推送失败，正在拉取并变基... (尝试次数: $i)"
+              git pull --rebase --autostash origin main
+              if [ $i -eq 5 ]; then
+                echo "::error::多次重试后推送仍然失败。"
+                exit 1
+              fi
+              sleep 2
+            fi
+          done          # -L: 跟随重定向
           # 我们先用 curl 下载，但不确定文件名
           curl -s -L -J -O "$IMAGE_URL"
 
