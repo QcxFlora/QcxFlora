@@ -17,24 +17,96 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Download image with HTTP/1.1 protocol
+      - name: Download image from Anime API (waifu.pics)
         id: download_image
         run: |
-          IMAGE_URL="https://api.kxzjoker.cn/api/wallhere?type=bs"
-          TIMESTAMP=$(date +%Y%m%d%H%M)
-          TEMP_DOWNLOAD_FILE="temp_download"
+          # --- 安装 jq, 一个用于处理 JSON 的命令行工具 ---
+          sudo apt-get update && sudo apt-get install -y jq
 
-          echo "--- 步骤 1: 清理旧文件 ---"
-          find . -maxdepth 1 -type f \( -name "美图*.png" -o -name "美图*.jpg" \) -delete
+          # --- 使用稳定可靠的 waifu.pics API ---
+          # API文档: https://waifu.pics/docs
+          # 您可以更换 "waifu" 为其他类别, 例如:
+          # SFW (安全) 类别: waifu, neko, shinobu, megumin, bully, cuddle, cry, hug, awoo, kiss, lick, pat, smug, bonk, yeet, blush, smile, wave, highfive, handhold, nom, bite, glomp, slap, kill, kick, happy, wink, poke, dance, cringe
+          # NSFW (不安全) 类别: waifu, neko, trap, blowjob (请谨慎使用)
+          IMAGE_CATEGORY="waifu"
+          API_URL="https://api.waifu.pics/sfw/${IMAGE_CATEGORY}"
+
+          echo "--- 步骤 1: 清理旧图片 ---"
+          find . -maxdepth 1 -type f \( -name "美图*.png" -o -name "美图*.jpg" -o -name "美图*.gif" \) -delete
           echo "旧图片已清理。"
 
-          echo "--- 步骤 2: 强制使用 HTTP/1.1 协议下载 ---"
-          # 关键改动：加入 --http1.1 参数，绕过可能的 HTTP/2 协议问题
-          HTTP_STATUS=$(curl --http1.1 -s -L -w "%{http_code}" -o "$TEMP_DOWNLOAD_FILE" \
-            -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36" \
-            -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8" \
-            -H "Accept-Language: en-US,en;q=0.9" \
-            -H "Connection: keep-alive" \
+          echo "--- 步骤 2: 从 waifu.pics 获取图片链接 ---"
+          # 首先请求API，它会返回一个包含图片URL的JSON
+          JSON_RESPONSE=$(curl -s -L "$API_URL")
+          
+          # 使用 jq 从JSON响应中提取 "url" 字段的值
+          IMAGE_URL=$(echo "$JSON_RESPONSE" | jq -r '.url')
+
+          if [ -z "$IMAGE_URL" ] || [ "$IMAGE_URL" == "null" ]; then
+            echo "::error::未能从API响应中获取图片URL。API响应如下:"
+            echo "$JSON_RESPONSE"
+            exit 1
+          fi
+          
+          echo "成功获取图片链接: $IMAGE_URL"
+
+          # --- 步骤 3: 下载图片 ---
+          # 从提取出的URL下载图片
+          # 获取文件扩展名 (png, jpg, gif等)
+          EXTENSION="${IMAGE_URL##*.}"
+          TIMESTAMP=$(date +%Y%m%d%H%M)
+          NEW_IMAGE_NAME="美图${TIMESTAMP}.${EXTENSION}"
+
+          HTTP_STATUS=$(curl -s -L -w "%{http_code}" -o "$NEW_IMAGE_NAME" "$IMAGE_URL")
+
+          echo "请求 URL: $IMAGE_URL"
+          echo "HTTP 状态码: $HTTP_STATUS"
+
+          if [ "$HTTP_STATUS" -ne 200 ]; then
+            echo "::error::下载图片失败，HTTP 状态码为 $HTTP_STATUS。"
+            exit 1
+          fi
+
+          if [ ! -s "$NEW_IMAGE_NAME" ]; then
+            echo "::error::下载的文件为空。"
+            exit 1
+          fi
+
+          echo "图片已成功下载为: $NEW_IMAGE_NAME"
+
+          echo "new_image_name=$NEW_IMAGE_NAME" >> $GITHUB_OUTPUT
+          echo "image_downloaded=true" >> $GITHUB_OUTPUT
+
+      - name: Commit and push changes
+        if: success() && steps.download_image.outputs.image_downloaded == 'true'
+        run: |
+          NEW_IMAGE_NAME="${{ steps.download_image.outputs.new_image_name }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # 这个 sed 命令会匹配 美图*.* 并替换，兼容所有图片格式
+          sed -i -E "s|src=\"美图[0-9]*\.[a-zA-Z]+\"|src=\"${NEW_IMAGE_NAME}\"|" README.md
+          
+          git add README.md "${NEW_IMAGE_NAME}"
+          if git diff --staged --quiet; then
+            echo "没有文件变动，无需提交。"
+            exit 0
+          fi
+          git commit -m "chore: 更新每日图片 (${NEW_IMAGE_NAME}) [skip ci]"
+          for i in {1..5}; do
+            if git push origin main; then
+              echo "推送成功。"
+              break
+            else
+              echo "推送失败，尝试拉取并变基... (尝试次数: $i)"
+              git pull --rebase --autostash origin main
+              if [ $i -eq 5 ]; then
+                echo "::error::多次重试后推送仍然失败。"
+                exit 1
+              fi
+              sleep 3
+            fi
+          done            -H "Connection: keep-alive" \
             "$IMAGE_URL")
 
           echo "请求 URL: $IMAGE_URL"
