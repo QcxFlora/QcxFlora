@@ -6,7 +6,7 @@ on:
   workflow_dispatch: # 允许手动触发
 
 permissions:
-  contents: write # 授予写入仓库内容的权限
+  contents: write
 
 jobs:
   update-image:
@@ -15,26 +15,105 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          # 使用 GITHUB_TOKEN 来进行认证，以便后续可以推送代码
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Download and save image
+      - name: Download and verify image with anti-anti-scraping
         id: download_image
         run: |
-          # 生成带时间戳的新图片文件名
+          # 安装 file 命令，用于识别文件类型
+          sudo apt-get update && sudo apt-get install -y file
+
           TIMESTAMP=$(date +%Y%m%d%H%M)
           NEW_IMAGE_NAME="美图${TIMESTAMP}.png"
+          TEMP_DOWNLOAD_FILE="temp_download"
+          COOKIE_JAR="cookies.txt" # 用于存储和发送 Cookie 的文件
           IMAGE_URL="https://api.kxzjoker.cn/api/wallhere?type=bs"
 
-          echo "Attempting to download image from: $IMAGE_URL"
-
-          # --- 清理旧的图片文件 ---
-          # 使用 find 和 -delete，比 rm 更安全，可以避免在没有匹配项时出错
-          echo "Cleaning up old image files (美图*.png)..."
+          echo "--- 步骤 1: 清理旧文件 ---"
           find . -maxdepth 1 -name "美图*.png" -delete
+          rm -f "$COOKIE_JAR" "$TEMP_DOWNLOAD_FILE" # 清理上次运行的临时文件
+          echo "旧图片和临时文件已清理。"
 
-          # 使用 curl 下载图片，并保存为新的带时间戳的名称
-          # -f: 在服务器错误时静默失败（返回非零退出码）
+          echo "--- 步骤 2: 尝试下载内容 (带反反爬虫策略) ---"
+          # 使用 curl 模拟浏览器行为，并处理 Cookie
+          # -c: 将服务器返回的 Cookie 保存到 cookie jar 文件
+          # -b: 从 cookie jar 文件读取 Cookie 并发送
+          # -e: 设置 Referer 头
+          # 我们进行两次请求：第一次获取 Cookie，第二次带着 Cookie 获取图片
+          
+          echo "第一次请求: 访问 URL 以获取验证 Cookie..."
+          curl -s -L -c "$COOKIE_JAR" -o /dev/null \
+            -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36" \
+            -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8" \
+            -H "Accept-Language: en-US,en;q=0.9" \
+            -H "Connection: keep-alive" \
+            "$IMAGE_URL"
+
+          echo "第二次请求: 带着 Cookie 再次访问 URL 获取图片..."
+          HTTP_STATUS=$(curl -s -L -w "%{http_code}" -o "$TEMP_DOWNLOAD_FILE" \
+            -b "$COOKIE_JAR" \
+            -c "$COOKIE_JAR" \
+            -e "$IMAGE_URL" \
+            -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36" \
+            -H "Accept: image/png,image/jpeg,image/webp,*/*" \
+            -H "Accept-Language: en-US,en;q=0.9" \
+            -H "Connection: keep-alive" \
+            "$IMAGE_URL")
+          
+          echo "URL: $IMAGE_URL"
+          echo "HTTP 状态码: $HTTP_STATUS"
+
+          if [ "$HTTP_STATUS" -ne 200 ]; then
+            echo "::error::下载失败，HTTP 状态码为 $HTTP_STATUS。"
+            exit 1
+          fi
+
+          echo "--- 步骤 3: 验证文件类型 ---"
+          FILE_TYPE=$(file --mime-type -b "$TEMP_DOWNLOAD_FILE")
+          echo "下载的文件类型是: $FILE_TYPE"
+
+          if [[ "$FILE_TYPE" != "image/jpeg" && "$FILE_TYPE" != "image/png" && "$FILE_TYPE" != "image/webp" ]]; then
+            echo "::error::下载的内容不是有效的图片。反爬虫策略可能已失效。"
+            echo "API 返回内容如下:"
+            cat "$TEMP_DOWNLOAD_FILE"
+            exit 1
+          fi
+
+          echo "--- 步骤 4: 验证通过，重命名文件 ---"
+          mv "$TEMP_DOWNLOAD_FILE" "$NEW_IMAGE_NAME"
+          echo "图片已成功下载并验证为: $NEW_IMAGE_NAME"
+
+          echo "new_image_name=$NEW_IMAGE_NAME" >> $GITHUB_OUTPUT
+          echo "image_downloaded=true" >> $GITHUB_OUTPUT
+
+      - name: Commit and push changes
+        if: success() && steps.download_image.outputs.image_downloaded == 'true'
+        run: |
+          # (此部分与上一版相同，保持健壮的提交和推送逻辑)
+          NEW_IMAGE_NAME="${{ steps.download_image.outputs.new_image_name }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          sed -i -E "s|src=\"美图[0-9]*\.png\"|src=\"${NEW_IMAGE_NAME}\"|" README.md
+          git add README.md "${NEW_IMAGE_NAME}"
+          if git diff --staged --quiet; then
+            echo "没有文件变动，无需提交。"
+            exit 0
+          fi
+          git commit -m "chore: 更新每日图片 (${NEW_IMAGE_NAME}) [skip ci]"
+          for i in {1..5}; do
+            if git push origin main; then
+              echo "推送成功。"
+              break
+            else
+              echo "推送失败，尝试拉取并变基... (尝试次数: $i)"
+              git pull --rebase --autostash origin main
+              if [ $i -eq 5 ]; then
+                echo "::error::多次重试后推送仍然失败。"
+                exit 1
+              fi
+              sleep 3
+            fi
+          done          # -f: 在服务器错误时静默失败（返回非零退出码）
           # -s: 静默模式
           # -L: 跟随重定向
           # -o: 输出到文件
