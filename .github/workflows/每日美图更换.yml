@@ -17,24 +17,93 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Download image using Headless Browser (Puppeteer)
+      - name: Download image via a proxy
         id: download_image
         run: |
-          # --- 步骤 1: 设置 Node.js 环境并安装 Puppeteer ---
-          echo "设置 Node.js 环境..."
-          sudo apt-get update
-          sudo apt-get install -y nodejs npm
-          echo "安装 Puppeteer... (这可能需要几分钟，因为它会下载一个 Chrome 浏览器)"
-          npm install puppeteer
-
-          # --- 步骤 2: 编写并执行 Node.js 脚本来下载图片 ---
-          TIMESTAMP=$(date +%Y%m%d%H%M)
-          # 注意：我们不知道最终图片是 png 还是 jpg，先用一个临时名
-          TEMP_IMAGE_PATH="temp_image"
+          # --- 原始的目标 API ---
+          ORIGINAL_API_URL="https://api.kxzjoker.cn/api/wallhere?type=bs"
           
-          # 将 Node.js 脚本写入一个文件
-          cat <<'EOF' > download.js
-          const puppeteer = require('puppeteer');
+          # --- 使用一个代理服务来请求它 ---
+          # 这个代理会将我们的请求从国内服务器发出
+          # 注意：为了方便演示，这里使用了一个公共代理。长期使用建议您创建自己的免费云函数。
+          PROXY_URL="https://proxy.cors.sh/${ORIGINAL_API_URL}"
+
+          TIMESTAMP=$(date +%Y%m%d%H%M)
+          # 扩展名未知，先下载再判断
+          TEMP_DOWNLOAD_FILE="temp_download"
+          
+          echo "--- 步骤 1: 清理旧文件 ---"
+          find . -maxdepth 1 -type f \( -name "美图*.png" -o -name "美图*.jpg" \) -delete
+          echo "旧图片已清理。"
+
+          echo "--- 步骤 2: 通过国内代理下载新图片 ---"
+          HTTP_STATUS=$(curl -s -L -w "%{http_code}" -o "$TEMP_DOWNLOAD_FILE" \
+            -H "x-cors-api-key: temp_123456" \
+            -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36" \
+            "$PROXY_URL")
+
+          echo "请求 URL (通过代理): $PROXY_URL"
+          echo "HTTP 状态码: $HTTP_STATUS"
+
+          if [ "$HTTP_STATUS" -ne 200 ]; then
+            echo "::error::通过代理下载失败，HTTP 状态码为 $HTTP_STATUS。"
+            exit 1
+          fi
+
+          if [ ! -s "$TEMP_DOWNLOAD_FILE" ]; then
+            echo "::error::下载的文件为空。"
+            exit 1
+          fi
+          
+          # --- 步骤 3: 动态判断文件类型并重命名 ---
+          # 安装 file 工具
+          sudo apt-get update && sudo apt-get install -y file
+          FILE_TYPE=$(file --mime-type -b "$TEMP_DOWNLOAD_FILE")
+          echo "检测到文件类型为: $FILE_TYPE"
+          
+          EXTENSION="jpg" # 默认为 jpg
+          if [[ "$FILE_TYPE" == "image/png" ]]; then
+            EXTENSION="png"
+          elif [[ "$FILE_TYPE" != "image/jpeg" ]]; then
+             echo "::error::下载的内容不是有效的图片 (JPEG/PNG)。实际类型为: $FILE_TYPE。"
+             exit 1
+          fi
+
+          NEW_IMAGE_NAME="美图${TIMESTAMP}.${EXTENSION}"
+          mv "$TEMP_DOWNLOAD_FILE" "$NEW_IMAGE_NAME"
+          echo "图片已成功下载为: $NEW_IMAGE_NAME"
+
+          echo "new_image_name=$NEW_IMAGE_NAME" >> $GITHUB_OUTPUT
+          echo "image_downloaded=true" >> $GITHUB_OUTPUT
+
+      - name: Commit and push changes
+        if: success() && steps.download_image.outputs.image_downloaded == 'true'
+        run: |
+          # (此部分无需改动)
+          NEW_IMAGE_NAME="${{ steps.download_image.outputs.new_image_name }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          sed -i -E "s|src=\"美图[0-9]*\.(png|jpg)\"|src=\"${NEW_IMAGE_NAME}\"|" README.md
+          git add README.md "${NEW_IMAGE_NAME}"
+          if git diff --staged --quiet; then
+            echo "没有文件变动，无需提交。"
+            exit 0
+          fi
+          git commit -m "chore: 更新每日图片 (${NEW_IMAGE_NAME}) [skip ci]"
+          for i in {1..5}; do
+            if git push origin main; then
+              echo "推送成功。"
+              break
+            else
+              echo "推送失败，尝试拉取并变基... (尝试次数: $i)"
+              git pull --rebase --autostash origin main
+              if [ $i -eq 5 ]; then
+                echo "::error::多次重试后推送仍然失败。"
+                exit 1
+              fi
+              sleep 3
+            fi
+          done          const puppeteer = require('puppeteer');
           const fs = require('fs');
 
           (async () => {
