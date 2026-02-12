@@ -6,7 +6,7 @@ on:
   workflow_dispatch: # 允许手动触发
 
 permissions:
-  contents: write
+  contents: write # 授予写入仓库内容的权限
 
 jobs:
   update-image:
@@ -17,24 +17,92 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Download image from Anime API (waifu.pics)
+      - name: Download and save image
         id: download_image
         run: |
-          # --- 安装 jq, 一个用于处理 JSON 的命令行工具 ---
-          sudo apt-get update && sudo apt-get install -y jq
+          # --- 使用可以直接返回图片的二次元 API ---
+          # 这个 API 会随机重定向到一个图片地址
+          # 更多选项可以参考其文档
+          IMAGE_URL="https://iw233.cn/api.php?sort=random"
 
-          # --- 使用稳定可靠的 waifu.pics API ---
-          # API文档: https://waifu.pics/docs
-          # 您可以更换 "waifu" 为其他类别, 例如:
-          # SFW (安全) 类别: waifu, neko, shinobu, megumin, bully, cuddle, cry, hug, awoo, kiss, lick, pat, smug, bonk, yeet, blush, smile, wave, highfive, handhold, nom, bite, glomp, slap, kill, kick, happy, wink, poke, dance, cringe
-          # NSFW (不安全) 类别: waifu, neko, trap, blowjob (请谨慎使用)
-          IMAGE_CATEGORY="waifu"
-          API_URL="https://api.waifu.pics/sfw/${IMAGE_CATEGORY}"
-
-          echo "--- 步骤 1: 清理旧图片 ---"
+          # --- 清理旧的图片文件 ---
+          echo "Cleaning up old image files (美图*.*)..."
+          # 使用 find 清理所有格式的旧图片
           find . -maxdepth 1 -type f \( -name "美图*.png" -o -name "美图*.jpg" -o -name "美图*.gif" \) -delete
-          echo "旧图片已清理。"
 
+          # --- 下载图片 ---
+          # 使用 curl 的 -J -O 参数来自动处理文件名
+          # -J: 使用服务器提供的 Content-Disposition 文件名
+          # -O: 将文件保存为远程服务器上的名字
+          # -L: 跟随重定向
+          # 我们先用 curl 下载，但不确定文件名
+          curl -s -L -J -O "$IMAGE_URL"
+
+          # --- 查找新下载的文件并重命名 ---
+          # 查找最新被修改的图片文件，这应该就是我们刚下载的
+          # 注意：这个 API 下载的文件名可能不是我们想要的格式
+          DOWNLOADED_FILE=$(ls -t | grep -E '\.(jpg|jpeg|png|gif)' | head -n 1)
+
+          if [ -z "$DOWNLOADED_FILE" ]; then
+            echo "::error::Image download failed. No new image file found."
+            exit 1
+          fi
+
+          # 生成我们自己的带时间戳的新文件名
+          TIMESTAMP=$(date +%Y%m%d%H%M)
+          EXTENSION="${DOWNLOADED_FILE##*.}"
+          NEW_IMAGE_NAME="美图${TIMESTAMP}.${EXTENSION}"
+          
+          # 重命名文件
+          mv "$DOWNLOADED_FILE" "$NEW_IMAGE_NAME"
+
+          # 检查文件是否存在且非空
+          if [ ! -s "$NEW_IMAGE_NAME" ]; then
+            echo "::error::Downloaded image file $NEW_IMAGE_NAME is empty or does not exist."
+            exit 1
+          fi
+          
+          echo "Image downloaded successfully as $NEW_IMAGE_NAME."
+
+          # 将新图片名称作为输出传递给后续步骤
+          echo "new_image_name=$NEW_IMAGE_NAME" >> $GITHUB_OUTPUT
+          echo "image_downloaded=true" >> $GITHUB_OUTPUT
+
+      - name: Commit and push changes
+        if: success() && steps.download_image.outputs.image_downloaded == 'true'
+        run: |
+          NEW_IMAGE_NAME="${{ steps.download_image.outputs.new_image_name }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # --- 更新 README.md 文件 ---
+          # 这个 sed 命令会匹配 美图*.* 并替换，兼容所有图片格式
+          sed -i -E "s|src=\"美图[0-9]*\.[a-zA-Z0-9]+\"|src=\"${NEW_IMAGE_NAME}\"|" README.md
+          echo "README.md updated to reference: ${NEW_IMAGE_NAME}"
+
+          git add README.md "${NEW_IMAGE_NAME}"
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git commit -m "chore: Update daily image (${NEW_IMAGE_NAME}) [skip ci]"
+          
+          # 使用健壮的推送逻辑
+          for i in {1..5}; do
+            if git push origin main; then
+              echo "Push successful on attempt $i."
+              break
+            else
+              echo "Push failed on attempt $i. Retrying with pull --rebase..."
+              git pull --rebase --autostash origin main
+              if [ $i -eq 5 ]; then
+                echo "::error::Failed to push changes after multiple retries."
+                exit 1
+              fi
+              sleep 2
+            fi
+          done
+          echo "Image and README.md updated and pushed successfully."
           echo "--- 步骤 2: 从 waifu.pics 获取图片链接 ---"
           # 首先请求API，它会返回一个包含图片URL的JSON
           JSON_RESPONSE=$(curl -s -L "$API_URL")
