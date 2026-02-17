@@ -29,7 +29,7 @@
 ## **白丝~**
 <a href="https://api.kxzjoker.cn/api/wallhere?type=bs">点我<br>
 ### **<a href="https://api.waifu.pics/sfw/waifu">今日份美图**
-<img style="float: right;" src="美图202602160151.png">
+<img style="float: right;" src="美图202602170150.jpg">
 <div style="clear: both; height: 0; overflow: hidden; margin: 0; padding: 0;"></div>
 
 <div align="right"><a href="http://cxk.fan/api.php">小黑子食不食食油饼</a></div>
